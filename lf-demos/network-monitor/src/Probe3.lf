@@ -1,0 +1,40 @@
+/**
+ * This version puts two probes on lf-mac.eecs.berkeley.edu and sends all measurements to stdout.
+ */
+target C {
+  coordination: decentralized,
+  timeout: 60 s,
+  keepalive: true
+}
+
+reactor Node(period: time = 1 s) {
+  input in: int
+  output out: int
+  timer t(0, period)
+  state count: int = 0
+
+  method measure(): void {=
+    interval_t lag = lf_time_physical() - lf_time_logical();
+    char* result;
+    lf_print("************** Lag: " PRINTF_TIME, lag);
+  =}
+
+  reaction(t) -> out {=
+    lf_set(out, self->count++);
+  =}
+
+  // Handle STP violations just like normal inputs.
+  reaction(in) {=
+    measure();
+  =} tardy
+}
+
+federated reactor at lf-mac.eecs.berkeley.edu {
+  p1 = new Node()
+  p2 = new Node() at lf-mac.eecs.berkeley.edu;
+  p3 = new Node() at lf-mac.eecs.berkeley.edu;
+
+  p1.out -> p2.in
+  p2.out -> p3.in
+  p3.out -> p1.in
+}

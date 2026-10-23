@@ -1,0 +1,65 @@
+/**
+ * This program launches an instance of `PolledSimulator` and then publishes to the `poll_topic`
+ * MQTT topic to request the current status of the simulator. It then subscribes to the
+ * `response_topic` and prints the received messages to the console. The period at which it polls
+ * the simulator is specified by the `period` parameter.
+ *
+ * To get reasonable timestamps on the received messages, this program has no timed activity except
+ * that driven by the polling clock. Assuming that the simulator responds within the polling period,
+ * the response message will have a tag equal to the tag of the polling clock plus one microstep.
+ * Hence, the response message will have the same timestamp as the polling clock.
+ *
+ * See ../README.md for prerequisites and further information.
+ *
+ * @author Edward A. Lee
+ *
+ * @param broker The MQTT broker address.
+ * @param poll_topic The topic to publish to.
+ * @param response_topic The topic to subscribe to.
+ * @param period The period at which to poll the simulator.
+ */
+target C {
+  keepalive: true,
+  timeout: 15 s
+}
+
+import MQTTPublisher from <mqtt-c/MQTTPublisher.lf>
+import MQTTSubscriber from <mqtt-c/MQTTSubscriber.lf>
+import PrintMessage from "lib/PrintMessage.lf"
+
+preamble {=
+  #include <stdio.h> // For snprintf()
+=}
+
+main reactor(
+    broker: string = "tcp://localhost:1883",
+    poll_topic: string = "simulator-poll",
+    response_topic: string = "simulator-response",
+    period: time = 1 sec) {
+  timer t(0, period)
+  timer delayed_start(2 s)
+  pub = new MQTTPublisher(address=broker, topic=poll_topic)
+  sub = new MQTTSubscriber(address=broker, topic=response_topic, use_physical_time=false, offset=0)
+  dsp = new PrintMessage()
+  sub.message -> dsp.message
+
+  // For some reason, the mosquitto broker fails to grant a connection without the delayed start.
+  // It seems to not like getting connection requests too close together.
+  reaction(delayed_start) {=
+    // Launch the simulator.
+    char* command;
+    // Invoke through bash to set the DYLD_LIBRARY_PATH environment variable.
+    asprintf(&command, "bash -c \"export DYLD_LIBRARY_PATH=%s; %s/bin/PolledSimulator &\"",
+        getenv("DYLD_LIBRARY_PATH"),
+        LF_PACKAGE_DIRECTORY);
+    system(command);
+    lf_print("Launched simulator: %s", command);
+    free(command);
+  =}
+
+  reaction(t) -> pub.in {=
+    char* command;
+    asprintf(&command, "poll");
+    lf_set(pub.in, command); // The value is ignored, but it has to be dynamically allocated.
+  =}
+}

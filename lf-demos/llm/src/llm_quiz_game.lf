@@ -1,0 +1,27 @@
+/**
+ * Main LF reactor that connects three independently defined reactors:
+ *
+ * LlmA : inference for the Llama-2-7B model.
+ * LlmB : inference for the Llama-2-70B model.
+ * Judge: Reads user queries, measures timing, and decides the winner.
+ *  This main reactor composes the LLM reactors and Judge into one coordinated system.
+ *  All timing and winner-determination logic reside in the sub-reactors in "llm_base_class.lf"
+ * @author Deeksha Prahlad and Hokeun Kim
+ */
+target Python { keepalive: true, DNET: false }
+
+import LlmA from "llm_base_class.lf"
+import LlmB from "llm_base_class.lf"
+import Judge from "llm_base_class.lf"
+
+main reactor {
+  llma_response = new LlmA()
+  llmb_response = new LlmB()
+  j = new Judge()
+
+  j.ask -> llma_response.user_in
+  j.ask -> llmb_response.user_in
+  
+  llma_response.answer -> j.llma
+  llmb_response.answer -> j.llmb
+}

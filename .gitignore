@@ -1,0 +1,18 @@
+.DS_Store
+venv/
+systemc-3.0.2/
+build/
+*.zip
+**/runs/
+*.vvp
+# LaTeX
+ASD_Relazione/main.aux
+ASD_Relazione/main.log
+ASD_Relazione/main.fls
+ASD_Relazione/main.fdb_latexmk
+ASD_Relazione/main.synctex.gz
+ASD_Relazione/main.out
+ASD_Relazione/main.toc
+ASD_Relazione/main.lof
+ASD_Relazione/main.listing
+lf-demos/lf-cli/

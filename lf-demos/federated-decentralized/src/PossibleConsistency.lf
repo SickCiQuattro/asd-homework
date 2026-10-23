@@ -1,0 +1,42 @@
+/**
+ * In this pattern, a maxwait of zero enables each Update reactor to advance its tag under the
+ * assumption that the period is sufficiently large that when physical time reaches a timer time,
+ * the remote input with the _previous_ timer time will have been received. This situation is
+ * described in the [CAL theorem](https://dl.acm.org/doi/10.1145/3609119) paper, where the
+ * processing offsets go to infinity.
+ *
+ * Note that the centralized coordinator does not require this assumption.
+ *
+ * @author Edward A. Lee
+ */
+target C {
+  coordination: decentralized
+}
+
+reactor Update {
+  input remote: int
+  output out: int
+  state balance: int = 0
+  timer p(0, 100 ms)
+
+  reaction(p) -> out {=
+    lf_set(out, self->balance++);
+  =}
+
+  reaction(remote) {=
+    self->balance += remote->value;
+    lf_print("Balance at time " PRINTF_TIME " is %d", lf_time_logical_elapsed(), self->balance);
+  =} tardy {=
+    // Unexpected.
+    lf_print_warning("Unexpected STP violation");
+  =}
+}
+
+federated reactor {
+  u1 = new Update()
+  u2 = new Update()
+  @absent_after(forever)
+  u1.out -> u2.remote
+  @absent_after(forever)
+  u2.out -> u1.remote
+}

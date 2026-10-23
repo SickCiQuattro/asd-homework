@@ -1,0 +1,59 @@
+target C
+
+/**
+ * An account manager that accepts deposits or withdrawls on two inputs, maintains a bank balance,
+ * and prevents overdrafts. If the deposits and/or widthdrawls at any time result in a negative bank
+ * balance, then one or more of the transactions will be rejected and a penalty will be imposed. In
+ * particular, if one input is a withdrawl and the other is a deposit, then the withdrawl will be
+ * rejected. If both inputs are withdrawls, then if in1 alone does not result in a negative balance,
+ * then the in1 withdrawl will be accepted and the in2 withdrawl rejected. If in1 is rejected, then
+ * in2 may be allowed if it does not result in a negative balance.
+ */
+reactor Account {
+  input in1: int
+  input in2: int
+  output out: int
+  state balance: int = 0
+
+  reaction(in1, in2) -> out {=
+    int in1_val = 0;
+    int in2_val = 0;
+    if (in1->is_present) {
+      lf_print("in1 transaction: %d", in1->value);
+      in1_val = in1->value;
+    }
+    if (in2->is_present) {
+      lf_print("in2 transaction: %d", in2->value);
+      in2_val = in2->value;
+    }
+    int tentative = self->balance + in1_val + in2_val;
+    if (tentative >= 0) {
+      self->balance = tentative;
+    } else {
+      // One or both must be negative.
+      if (in1_val >= 0) {
+        // Only in2 is negative, so accept in1 and reject in2.
+        self->balance += in1_val - 30;
+        lf_print("************ Overdraft! in2 transaction denied. Penalty of $30.");
+      } else if (in2_val >= 0) {
+        // Only in1 is negative, so accept in2 and reject in1.
+        self->balance += in2_val - 30;
+        lf_print("************ Overdraft! in1 transaction denied. Penalty of $30.");
+      } else {
+        // Both are negative.  Apply penalty first.
+        self->balance -= 30;
+        lf_print("************ Overdraft! Penalty of $30.");
+        if (self->balance + in1_val >= 0) {
+          self->balance += in1_val;
+          lf_print("************ in2 transaction denied.");
+        } else if (self->balance + in2_val >= 0) {
+          self->balance += in2_val;
+          lf_print("************ in1 transaction denied.");
+        } else {
+          lf_print("************ Both transactions denied.");
+        }
+      }
+    }
+    lf_set(out, self->balance);
+  =}
+}

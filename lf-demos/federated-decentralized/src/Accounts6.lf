@@ -1,0 +1,44 @@
+target C {
+  coordination: decentralized,
+  keepalive: true
+}
+
+import IntWebSocketServer from "lib/IntWebSocketServer.lf"
+import AccountManager from "lib/AccountManager.lf"
+
+reactor Server(
+    hostport: int = 8080,
+    initial_file: string = {= NULL =},
+    null_message_period: time = 1 s) {
+  input in: int
+  output received: int
+  timer t(0, null_message_period)
+  w = new IntWebSocketServer(hostport=hostport, initial_file=initial_file)
+  in -> w.response
+
+  reaction(w.received, t) -> received {=
+    if (w.received->is_present) {
+      lf_set(received, w.received->value);
+    } else {
+      // Send a null message.
+      lf_set(received, 0);
+    }
+  =}
+}
+
+federated reactor {
+  w1 = new Server(hostport=8080, initial_file="Bank1.html")
+  w2 = new Server(hostport=8081, initial_file="Bank2.html")
+  @maxwait(forever)
+  a1 = new AccountManager()
+  @maxwait(forever)
+  a2 = new AccountManager()
+
+  w1.received -> a1.in1
+  w2.received -> a2.in2
+  w1.received -> a2.in1
+  w2.received -> a1.in2
+
+  a1.out -> w1.in
+  a2.out -> w2.in
+}

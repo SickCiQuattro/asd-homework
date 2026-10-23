@@ -1,0 +1,64 @@
+/**
+ * This version puts two probes on the local machine and sends all measurements to a web socket.
+ * point your browser to http://localhost:8080 and http://localhost:8081 to see the measurements.
+ */
+target C {
+  coordination: decentralized,
+  keepalive: true
+}
+
+import WebSocketServerString from "lib/WebSocketServerString.lf"
+
+reactor Node(period: time = 250 ms) {
+  preamble {=
+    #include <string.h> // For strlen()
+  =}
+  input in: int
+  output out: int
+  output lag: char*
+  timer t(0, period)
+  state count: int = 0
+
+  method measure(): char* {=
+    interval_t lag = lf_time_physical() - lf_time_logical();
+    char* result;
+    asprintf(&result, "{lag: " PRINTF_TIME "}", lag);
+    return result;
+  =}
+
+  reaction(t) -> out {=
+    lf_set(out, self->count++);
+  =}
+
+  reaction(in) -> lag {=
+    char* message = measure();
+    lf_set_array(lag, message, strlen(message));
+  =} tardy {=
+    // Handle STP violations just like normal inputs.
+    char* message = measure();
+    lf_set_array(lag, message, strlen(message));
+  =}
+}
+
+federated reactor {
+  w1 = new WebSocketServerString(
+      hostport=8080,
+      initial_file = {= LF_SOURCE_DIRECTORY LF_FILE_SEPARATOR "Probe1.html" =})
+  w2 = new WebSocketServerString(
+      hostport=8081,
+      initial_file = {= LF_SOURCE_DIRECTORY LF_FILE_SEPARATOR "Probe2.html" =})
+  w3 = new WebSocketServerString(
+      hostport=8082,
+      initial_file = {= LF_SOURCE_DIRECTORY LF_FILE_SEPARATOR "Probe3.html" =})
+  p1 = new Node()
+  p2 = new Node()
+  p3 = new Node()
+
+  p1.out -> p2.in  // p1 invia a p2
+  p2.out -> p3.in  // p2 invia a p3
+  p3.out -> p1.in  // p3 chiude l'anello
+
+  p1.lag -> w1.in
+  p2.lag -> w2.in
+  p3.lag -> w3.in
+}

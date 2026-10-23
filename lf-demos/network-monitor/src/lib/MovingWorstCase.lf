@@ -1,0 +1,49 @@
+/** A filter outputting the moving worst-case of the input */
+target C
+
+reactor MovingWorstCase(width: int = 1, window: int = 10) {
+  input[width] in: interval_t
+  output[width] out: interval_t
+
+  state values: interval_t**
+
+  // Allocate memory for necessary arrays.
+  reaction(startup) {=
+    self->values = (interval_t**)calloc(self->width, sizeof(interval_t*));
+    for (int i = 0; i < self->width; i++) {
+      self->values[i] = (interval_t*)calloc(self->window, sizeof(interval_t));
+    }
+  =}
+
+  // Implement the moving window
+  reaction(in) -> out {=
+    interval_t worst;
+    for (int i = 0; i < self->width; i++) {
+      if (!in[i]->is_present) {
+        continue;
+      }
+
+      worst = NEVER;
+
+      for (int j = 0; j < self->window - 1; j++) {
+        self->values[i][j] = self->values[i][j + 1];
+        if (self->values[i][j] > worst) {
+          worst = self->values[i][j];
+        }
+      }
+      self->values[i][self->window - 1] = in[i]->value;
+      if (in[i]->value > worst) {
+        worst = in[i]->value;
+      }
+      out[i]->value = worst;
+      lf_set_present(out[i]);
+    }
+  =}
+
+  reaction(shutdown) {=
+    for (int i = 0; i < self->width; i++) {
+      free(self->values[i]);
+    }
+    free(self->values);
+  =}
+}

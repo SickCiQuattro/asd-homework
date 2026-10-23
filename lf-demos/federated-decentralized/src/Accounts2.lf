@@ -1,0 +1,22 @@
+target C {
+  coordination: decentralized,
+  keepalive: true
+}
+
+import IntWebSocketServer from "lib/IntWebSocketServer.lf"
+import AccountManager from "lib/AccountManager.lf"
+
+federated reactor {
+  w1 = new IntWebSocketServer(hostport=8080, initial_file="Bank1.html")
+  w2 = new IntWebSocketServer(hostport=8081, initial_file="Bank2.html")
+  a1 = new AccountManager()
+  a2 = new AccountManager()
+
+  w1.received ~> a1.in1
+  w2.received ~> a2.in2
+  w1.received ~> a2.in1
+  w2.received ~> a1.in2
+
+  a1.out ~> w1.response
+  a2.out ~> w2.response
+}

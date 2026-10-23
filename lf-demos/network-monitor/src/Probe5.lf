@@ -1,0 +1,97 @@
+/**
+ * This examples also uses the NetworkMonitor, but instead of interacting with it through HTTP. It
+ * puts the other program inside the same federate. It gets the latency mesaurements from the output
+ * ports of the NetworkMonitor. Federate 0, periodically sends a command string to the other
+ * federates together with a timestamp at which the command should be executed. The timestamp is
+ * based off the latency measurements.
+ */
+target C {
+  coordination: decentralized
+}
+
+import NetworkMonitor from "lib/NetworkMonitor.lf"
+
+preamble {=
+  #include "network_latency_probe.h"
+
+  // A command to be sent between the nodes
+  typedef struct {
+    char cmd[256]; // Shell command to execute
+    instant_t timestamp; // The instant at which to execute the command
+  } CommandMessage;
+
+  // Macro for generating a shell command to say something
+  #if defined(PLATFORM_Linux)
+    #define SAY_SOMETHING(x) "spd-say '" x "'"
+  #elif defined(PLATFORM_Darwin)
+    #define SAY_SOMETHING(x) "say '" x "'"
+  #else
+    #error "Unsupported platform"
+  #endif
+=}
+
+reactor NodeSync(bank_index: int = 0, width: int = 1) {
+  input[width] probe_in: LatencyMessage
+  output[width] probe_out: LatencyMessage
+
+  output[width] cmd_out: CommandMessage
+  input[width] cmd_in: CommandMessage
+
+  monitor = new NetworkMonitor(bank_index=bank_index, width=width)
+  monitor.probe_out -> probe_out
+  probe_in -> monitor.probe_in
+
+  timer t(1 sec, 2 sec)
+  // FIXME: We could receive `width` commands with the same timestamp and get into trouble here.
+  logical action a_cmd: CommandMessage
+
+  reaction(t) monitor.latencies_filtered -> cmd_out {=
+    interval_t max_latency = NEVER;
+    instant_t cmd_timestamp = NEVER;
+    if (self->bank_index == 0) {
+      for (int i = 0; i<self->width; i++) {
+        if (monitor.latencies_filtered[i]->value > max_latency) {
+          max_latency = monitor.latencies_filtered[i]->value;
+        }
+      }
+
+      if (max_latency == FOREVER) {
+        lf_print_error("Max latency is FOREVER. Not sending any commands.");
+        return;
+      }
+
+      cmd_timestamp = lf_time_physical() + max_latency + MSEC(1);
+
+      for (int i = 0; i<self->width; i++) {
+        strcpy(cmd_out[i]->value.cmd, SAY_SOMETHING("Hello Lingua Franca!"));
+        cmd_out[i]->value.timestamp = cmd_timestamp;
+        lf_set_present(cmd_out[i]);
+      }
+    }
+  =}
+
+  reaction(cmd_in) -> a_cmd {=
+    for (int i = 0; i < self->width; i++) {
+      if (cmd_in[i]->is_present) {
+        interval_t delay = cmd_in[i]->value.timestamp - lf_time_logical();
+        if (delay < 0) {
+          lf_print_error("Command timestamp: " PRINTF_TIME" is in the past. Executing ASAP!", cmd_in[i]->value.timestamp);
+          delay = 0;
+        }
+        lf_schedule_copy(a_cmd, delay, &cmd_in[i]->value, 1);
+      }
+    }
+  =}
+
+  reaction(a_cmd) {=
+    if (system(a_cmd->value.cmd) != 0) {
+      lf_print_error("Command failed");
+    }
+  =}
+}
+
+federated reactor(num_nodes: int = 2) {
+  m = new[num_nodes] NodeSync(width=num_nodes)
+  m.probe_out ~> interleaved(m.probe_in)
+  m.cmd_out ~> interleaved(m.cmd_in)
+}

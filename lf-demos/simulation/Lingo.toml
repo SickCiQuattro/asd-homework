@@ -1,0 +1,15 @@
+[package]
+name = "simulation"
+version = "0.1.0"
+
+[[app]]
+name = "LockToSimulator"
+main = "src/LockToSimulator.lf"
+target = "C"
+platform = "Native"
+
+[app.properties]
+fast = false
+
+[dependencies]
+mqtt-c = {version=">=0.1", git="https://github.com/lf-lang/mqtt-c.git", branch="main"}

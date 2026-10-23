@@ -1,0 +1,41 @@
+target C {
+  coordination: decentralized,
+  keepalive: true
+}
+
+import IntWebSocketServer from "lib/IntWebSocketServer.lf"
+
+reactor ACIDAccountManager {
+  input in1: int
+  input in2: int
+  output out: int
+  state balance: int = 0
+
+  reaction(in1, in2) -> out {=
+    if (in1->is_present) {
+      lf_print("in1 transaction: %d", in1->value);
+      self->balance += in1->value;
+    }
+    if (in2->is_present) {
+      lf_print("in2 transaction: %d", in2->value);
+      self->balance += in2->value;
+    }
+    lf_set(out, self->balance);
+    lf_print("**** Balance: %d", self->balance);
+  =}
+}
+
+federated reactor {
+  w1 = new IntWebSocketServer(hostport=8080, initial_file="Bank1.html")
+  w2 = new IntWebSocketServer(hostport=8081, initial_file="Bank2.html")
+  a1 = new ACIDAccountManager()
+  a2 = new ACIDAccountManager()
+
+  w1.received ~> a1.in1
+  w2.received ~> a2.in2
+  w1.received ~> a2.in1
+  w2.received ~> a1.in2
+
+  a1.out ~> w1.response
+  a2.out ~> w2.response
+}

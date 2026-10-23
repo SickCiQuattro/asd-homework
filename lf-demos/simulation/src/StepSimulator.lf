@@ -1,0 +1,77 @@
+/**
+ * This program launches an instance of `SteppedSimulator` and then publishes to the `step_topic`
+ * MQTT topic to advance time in the simulator and request the current status of the simulator. It
+ * subscribes to the `response_topic` and prints the received messages to the console. The period at
+ * which it steps the simulator is specified by the `period` parameter.
+ *
+ * To get reasonable timestamps on the received messages, this program has no timed activity except
+ * that driven by the stepping clock. Assuming that the simulator responds within the stepping
+ * period, the response message will have a tag equal to the tag of the stepping clock plus one
+ * microstep. Hence, the response message will have the same timestamp as the stepping clock.
+ *
+ * See ../README.md for prerequisites and further information.
+ *
+ * @author Edward A. Lee
+ *
+ * @param broker The MQTT broker address.
+ * @param step_topic The topic to publish to.
+ * @param response_topic The topic to subscribe to.
+ * @param period The period at which to step the simulator.
+ * @param start_simulator The delay before starting the simulator.
+ * @param start_stepping The delay before starting the stepping.
+ */
+target C {
+  keepalive: true,
+  timeout: 15500 ms
+}
+
+import MQTTPublisher from <mqtt-c/MQTTPublisher.lf>
+import MQTTSubscriber from <mqtt-c/MQTTSubscriber.lf>
+import PrintMessage from "lib/PrintMessage.lf"
+
+preamble {=
+  #include <stdio.h> // For snprintf()
+=}
+
+main reactor(
+    broker: string = "tcp://localhost:1883",
+    step_topic: string = "simulator-step",
+    response_topic: string = "simulator-response",
+    period: time = 1 sec,
+    start_simulator: time = 1 s,
+    start_stepping: time = 2 s) {
+  timer t(start_stepping, period)
+  timer delayed_start(start_simulator)
+
+  pub = new MQTTPublisher(address=broker, topic=step_topic)
+  sub = new MQTTSubscriber(address=broker, topic=response_topic, use_physical_time=false, offset=0)
+  dsp = new PrintMessage()
+
+  sub.message -> dsp.message
+
+  // For some reason, the mosquitto broker fails to grant a connection without the delayed start.
+  // It seems to not like getting connection requests too close together.
+  reaction(delayed_start) {=
+    // Launch the simulator.
+    char* command;
+    // Invoke through bash to set the DYLD_LIBRARY_PATH environment variable.
+    asprintf(&command, "bash -c \"export DYLD_LIBRARY_PATH=%s; %s/bin/SteppedSimulator &\"",
+        getenv("DYLD_LIBRARY_PATH"),
+        LF_PACKAGE_DIRECTORY);
+    system(command);
+    lf_print("Launched simulator: %s", command);
+    free(command);
+  =}
+
+  reaction(t) -> pub.in {=
+    char* command;
+    asprintf(&command, "step");
+    lf_set_array(pub.in, command, 5);
+  =}
+
+  reaction(shutdown) -> pub.in {=
+    char* command;
+    asprintf(&command, "stop");
+    lf_set_array(pub.in, command, 5);
+  =}
+}

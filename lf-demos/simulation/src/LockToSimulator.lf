@@ -1,0 +1,46 @@
+/**
+ * This program launches an instance of `FreeRunningSimulator` and then subcribes to a topic that is
+ * published by that simulator and prints the received messages to the console. It runs as fast as
+ * possible, but locks its notion of logical time to the timestamp provided by the simulator.
+ *
+ * See ../README.md for prerequisites and further information.
+ *
+ * @author Edward A. Lee
+ *
+ * @param broker The MQTT broker address.
+ * @param topic The topic to subscribe to.
+ */
+target C {
+  fast: true,
+  keepalive: true
+}
+
+import MQTTSubscriber from <mqtt-c/MQTTSubscriber.lf>
+import PrintMessage from "lib/PrintMessage.lf"
+
+preamble {=
+  #include <stdio.h> // For snprintf()
+=}
+
+main reactor(broker: string = "tcp://localhost:1883", topic: string = "simulator-output") {
+  sub = new MQTTSubscriber(
+      address=broker,
+      topic=topic,
+      use_physical_time=false,
+      relative_timestamp=true,
+      offset=0)
+  dsp = new PrintMessage()
+  sub.message -> dsp.message
+
+  reaction(startup) {=
+    // Launch the simulator.
+    char* command;
+    // Invoke through bash to set the DYLD_LIBRARY_PATH environment variable.
+    asprintf(&command, "bash -c \"export DYLD_LIBRARY_PATH=%s; %s/bin/FreeRunningSimulator &\"",
+        getenv("DYLD_LIBRARY_PATH"),
+        LF_PACKAGE_DIRECTORY);
+    system(command);
+    lf_print("Launched simulator: %s", command);
+    free(command);
+  =}
+}

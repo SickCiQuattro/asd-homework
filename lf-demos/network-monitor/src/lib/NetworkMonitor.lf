@@ -1,0 +1,42 @@
+target C
+
+import NetworkLatencyProbe from "./NetworkLatencyProbe.lf"
+import MovingWorstCase from "./MovingWorstCase.lf"
+import LatencyHttpServer from "./HttpServer.lf"
+
+reactor NetworkMonitor(bank_index: int = 0, width: int = 1) {
+  input[width] probe_in: LatencyMessage
+  output[width] probe_out: LatencyMessage
+  output[width] latencies_raw: interval_t
+  output[width] latencies_filtered: interval_t
+
+  probe = new NetworkLatencyProbe(
+      bank_index=bank_index,
+      width=width,
+      request_interval = 2 sec,
+      worst_case_latency = 1 sec,
+      debug=false)
+
+  filter = new MovingWorstCase(width=width, window=10)
+  http = new LatencyHttpServer(width=width, port = {= 8080 + self->bank_index =})
+
+  probe.msg_out -> probe_out
+  probe_in -> probe.msg_in
+
+  probe.latencies -> filter.in
+  probe.latencies -> http.latencies
+
+  reaction(probe.latencies) -> latencies_raw {=
+    for (int i = 0; i < probe.latencies_width; i++) {
+      lf_set(latencies_raw[i], probe.latencies[i]->value);
+      lf_print("Raw Latency to peer %d: " PRINTF_TIME, i, probe.latencies[i]->value);
+    }
+  =}
+
+  reaction(filter.out) -> latencies_filtered {=
+    for (int i = 0; i < filter.out_width; i++) {
+      lf_set(latencies_filtered[i], filter.out[i]->value);
+      // lf_print("Moving worst-case latency to peer %d: " PRINTF_TIME, i, filter.out[i]->value);
+    }
+  =}
+}

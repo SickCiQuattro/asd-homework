@@ -1,0 +1,40 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en-US" lang="en-US">
+<body>
+  <script>
+  window.onload = function() {
+    var incoming = document.getElementById('messages');
+    var socketStatus = document.getElementById('status');
+    
+    const socket = new WebSocket('ws://localhost:8082', 'ws');
+    
+    socket.onopen = function() {
+      socketStatus.innerHTML = 'Connected to Probe 3';
+      socketStatus.className = 'open';
+    };
+
+    socket.onmessage = function(event) {
+      incoming.innerHTML = event.data;
+    };
+
+    socket.onerror = function(error) {
+      console.log('WebSocket Error: ' + error);
+    };
+
+    socket.onclose = function() {
+      socketStatus.innerHTML = 'Disconnected.';
+      socketStatus.className = 'closed';
+    };
+  };
+  </script>
+  <div id="page-wrapper">
+    <h1>Network Monitor (Probe 3)</h1>
+    <p>
+      Measured lag: <span id="messages">nothing yet</span></li>
+    </p>
+    <p>
+      <div id="status">Connecting...</div>
+    </p>
+  </div>
+</body>
+</html>

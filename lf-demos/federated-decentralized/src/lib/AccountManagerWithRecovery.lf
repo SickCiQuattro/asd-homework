@@ -1,0 +1,204 @@
+target C
+
+preamble {=
+  #ifndef TRANSACTION_T
+  #define TRANSACTION_T
+  typedef struct transaction_t {
+    int amount;
+    instant_t logical_time;
+  } transaction_t;
+  #endif
+=}
+
+/**
+ * An account manager that accepts deposits or withdrawls on two inputs, maintains a bank balance,
+ * and prevents overdrafts. If the deposits and/or widthdrawls at any time result in a negative bank
+ * balance, then one or more of the transactions will be rejected and a penalty will be imposed. In
+ * particular, if one input is a withdrawl and the other is a deposit, then the withdrawl will be
+ * rejected. If both inputs are withdrawls, then if local alone does not result in a negative
+ * balance, then the local withdrawl will be accepted and the remote withdrawl rejected. If local is
+ * rejected, then remote may be allowed if it does not result in a negative balance.
+ */
+reactor AccountManagerWithRecovery(true_balance_period: time = 10 s, min_spacing = 1 s) {
+  preamble {=
+    // Return an updated balance and local cash in/out given the previous balance, local
+    // cash in/out, and remote cash in/out.  If verbose is true, print information.
+    int update(int previous_balance, int local_val, int remote_val, int* actual_cash, bool verbose) {
+      int result;
+      if (previous_balance + local_val + remote_val >= 0) {
+        result = previous_balance + local_val + remote_val;
+        if (actual_cash) *actual_cash = local_val;
+      } else {
+        // One or both inputs is negative.
+        if (local_val >= 0) {
+          // Only remote is negative, so accept local and reject remote.
+          result = previous_balance + local_val - 30;
+          lf_print("************ Overdraft! remote transaction denied. Penalty of $30.");
+          if (actual_cash) *actual_cash = local_val; // Overdraft penalty is reported by the remote.
+        } else if (remote_val >= 0) {
+          // Only local is negative, so accept remote and reject local.
+          result = previous_balance + remote_val - 30;
+          lf_print("************ Overdraft! local transaction denied. Penalty of $30.");
+          if (actual_cash) *actual_cash = -30; // No cash dispensed. Overdraft fee applied.
+        } else {
+          // Both are negative.  Apply penalty first.
+          result = previous_balance - 30;
+          lf_print("************ Overdraft! Penalty of $30.");
+          if (previous_balance + local_val >= 0) {
+            result = previous_balance + local_val;
+            lf_print("************ remote transaction denied.");
+            if (actual_cash) *actual_cash = local_val;
+          } else if (previous_balance + remote_val >= 0) {
+            result = previous_balance + remote_val;
+            lf_print("************ local transaction denied.");
+            if (actual_cash) *actual_cash = -30;
+          } else {
+            lf_print("************ Both transactions denied.");
+            result = previous_balance;
+            if (actual_cash) *actual_cash = -30;
+          }
+        }
+      }
+      return result;
+    }
+  =}
+
+  input local: int
+  input remote: int
+  input true_balance: int
+  output out: int     // Remaining balance.
+  output actual: int  // The actual change made (cash dispensed or deposited)
+
+  state balance: int = 0
+  state local_transactions: transaction_t* = {= NULL =}
+  state remote_transactions: transaction_t* = {= NULL =}
+  state transaction_size: size_t = 0
+  state local_transaction_index: size_t = 0
+  state remote_transaction_index: size_t = 0
+  state latest_true_balance: transaction_t = {= {.amount = 0, .logical_time = NEVER} =}
+
+  timer n(true_balance_period, true_balance_period)
+
+  reaction(startup) {=
+    // Allocate memory to record transactions for replay.
+    self->transaction_size = self->true_balance_period / self->min_spacing;
+    self->local_transactions = (transaction_t*)calloc(self->transaction_size, sizeof(transaction_t));
+    LF_ASSERT_NON_NULL(self->local_transactions);
+    self->remote_transactions = (transaction_t*)calloc(self->transaction_size, sizeof(transaction_t));
+    LF_ASSERT_NON_NULL(self->remote_transactions);
+  =}
+
+  reaction(local, remote) -> out, actual {=
+    int local_val = 0;
+    int remote_val = 0;
+    int actual_cash = 0; // Only produce actual output in reaction to non-zero local inputs.
+    if (local->is_present) {
+      lf_print("local transaction: %d", local->value);
+      local_val = local->value;
+      // Record the value for replay.
+      if (self->local_transaction_index < self->transaction_size) {
+        transaction_t* tr = &self->local_transactions[self->local_transaction_index++];
+        tr->amount = local_val;
+        // NOTE: If an STP violation has occurred, the following could record the intended
+        // time instead of the current time. The recorded inputs could then be played back
+        // in temporal order.  This will simply avoid a few (probably very few) transient
+        // inconsistencies.
+        tr->logical_time = lf_time_logical();
+      } else {
+        lf_print_error("!!!! Minimum spacing policy was violated for local transactions!");
+      }
+    }
+    if (remote->is_present) {
+      lf_print("remote transaction: %d", remote->value);
+      remote_val = remote->value;
+      // Record the value for replay.
+      if (self->remote_transaction_index < self->transaction_size) {
+        transaction_t* tr = &self->remote_transactions[self->remote_transaction_index++];
+        tr->amount = remote_val;
+        // NOTE: If an STP violation has occurred, the following could record the intended
+        // time instead of the current time. The recorded inputs could then be played back
+        // in temporal order.  This will simply avoid a few (probably very few) transient
+        // inconsistencies.
+        tr->logical_time = lf_time_logical();
+      } else {
+        lf_print_error("!!!! Minimum spacing policy was violated for local transactions!");
+      }
+    }
+    self->balance = update(self->balance, local_val, remote_val, &actual_cash, true);
+
+    lf_set(out, self->balance);
+    lf_print("**** Balance: %d, Local cash in/out: %d", self->balance, actual_cash);
+
+    if (actual_cash != 0) {
+      lf_set(actual, actual_cash);
+    }
+  =}
+
+  reaction(true_balance) {=
+    self->latest_true_balance.logical_time = lf_time_logical();
+    self->latest_true_balance.amount = true_balance->value;
+  =}
+
+  // Produce a null message, unless there is a simultaneous actual cash
+  // transaction already on the output put there by the previous reaction.
+  // At these times, there should also be a `true_balance` input, which tells
+  // us what the true balance was `true_balance_period` ago. Use this to
+  // update the balance by replaying all the local and remote transactions
+  // that have occurred since then.  Note that `true_balance` inputs that
+  // arrive in between timer events are ignored.
+  reaction(n) -> actual {=
+    // If the previous reaction did not produce an actual output, produce 0.
+    if (!actual->is_present) {
+      lf_set(actual, 0);
+    }
+    // Update the balance, but only if a new true_balance was actually received at this time.
+    if (self->latest_true_balance.logical_time == lf_time_logical()) {
+      // Replay recorded inputs. Each array is in timestamp order, but need to replay
+      // interleaved in timestamp order.
+      size_t count_local = 0;
+      size_t count_remote = 0;
+      int true_balance = self->latest_true_balance.amount;
+      while (count_local < self->local_transaction_index || count_remote < self->remote_transaction_index) {
+        if (count_local < self->local_transaction_index && count_remote < self->remote_transaction_index) {
+          // Have both a local and remote transaction. Process the one with the lesser time.
+          if (self->local_transactions[count_local].logical_time < self->remote_transactions[count_remote].logical_time) {
+            // Local is earlier.
+            true_balance = update(true_balance, self->local_transactions[count_local++].amount, 0, NULL, false);
+          } else if (self->remote_transactions[count_remote].logical_time < self->local_transactions[count_local].logical_time) {
+            // Remote is earlier.
+            true_balance = update(true_balance, 0, self->remote_transactions[count_remote++].amount, NULL, false);
+          } else {
+            // Transactions are simultaneous.
+            true_balance = update(true_balance,
+                self->local_transactions[count_local++].amount,
+                self->remote_transactions[count_remote++].amount,
+                NULL, false);
+          }
+        } else if (count_local < self->local_transaction_index) {
+          // Only local transactions remaining.
+          true_balance = update(true_balance, self->local_transactions[count_local++].amount, 0, NULL, false);
+        } else {
+          // Only remote transactions remaining.
+          true_balance = update(true_balance, 0, self->remote_transactions[count_remote++].amount, NULL, false);
+        }
+      }
+      self->balance = true_balance;
+      lf_print("============== Balance updated at time " PRINTF_TIME " is %d", lf_time_logical_elapsed(), self->balance);
+
+      // Reset to start recording again in the next time interval.
+      self->local_transaction_index = 0;
+      self->remote_transaction_index = 0;
+    } else {
+      // Because of the after delay, this is only a problem after some time.
+      if (lf_time_logical_elapsed() > self->true_balance_period) {
+        lf_print_warning("!!!! Failed to receive updated true balance at (elapsed) time " PRINTF_TIME,
+            lf_time_logical_elapsed());
+      }
+    }
+  =}
+
+  reaction(shutdown) {=
+    if (self->local_transactions) free(self->local_transactions);
+    if (self->remote_transactions) free(self->remote_transactions);
+  =}
+}

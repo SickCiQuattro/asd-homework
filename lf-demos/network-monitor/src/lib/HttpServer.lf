@@ -1,0 +1,108 @@
+/** A simple HTTP server based on libmicrohttpd */
+target C {
+  cmake-include: "HttpServer.cmake",
+  files: ["http_server.h"]
+}
+
+preamble {=
+  #include <microhttpd.h>
+  #include <stdio.h>
+  #include <stdlib.h>
+  #include <string.h>
+  #include "http_server.h"
+=}
+
+reactor SimpleHttpServer(port: int = 8080) {
+  input response: HttpResponse
+
+  state response_data: HttpResponse
+  state daemon: {= struct MHD_Daemon * =} = 0
+  state lock: lf_mutex_t
+
+  preamble {=
+      const char *response_data;
+      void *lock;
+
+      // This is a callback which is called, asynchronously, from the HTTP server daemon each time a HTTP request
+      // is received from a client. As far as I understand, this function must handle the request and return
+      // a status code to the daemon. Ideally, we would have this callback schedule an event on a physical action
+      // but I dont think that is possible with the current API. Thus we need to access reactor state directly
+      // from this callback and a mutex is needed.
+      static enum MHD_Result answer_to_connection(void *cls, struct MHD_Connection *connection,
+                                  const char *url, const char *method,
+                                  const char *version, const char *upload_data,
+                                  long unsigned int *upload_data_size, void **con_cls) {
+      struct MHD_Response *response;
+
+      // Here we read the response_data which is a pointer to the reactor state. We have
+      // to use a mutex because the response_data can be updated by the reactor while we
+      // are reading it.
+      LF_MUTEX_LOCK(lock);
+      response = MHD_create_response_from_buffer(strlen(response_data),
+                                                 (void *)response_data,
+                                                 MHD_RESPMEM_PERSISTENT);
+      LF_MUTEX_UNLOCK(lock);
+
+      // Add CORS headers
+      MHD_add_response_header(response, "Access-Control-Allow-Origin", "*");
+      MHD_add_response_header(response, "Content-Type", "application/json");
+
+      // Send response
+      int ret = MHD_queue_response(connection, MHD_HTTP_OK, response);
+      MHD_destroy_response(response);
+      return ret;
+    }
+  =}
+
+  reaction(startup) {=
+    LF_MUTEX_INIT(&self->lock);
+
+    lock = &self->lock;
+    response_data = self->response_data.msg;
+    lf_print("Starting HTTP server on port %d", self->port);
+    self->daemon = MHD_start_daemon(MHD_USE_SELECT_INTERNALLY, self->port, NULL, NULL,
+                                    &answer_to_connection, NULL, MHD_OPTION_END);
+
+    if (!self->daemon) {
+      lf_print_error_and_exit("Failed to start HTTP server on port %d", self->port);
+    }
+  =}
+
+  reaction(response) {=
+    // Update the response data in a critical section.
+    LF_MUTEX_LOCK(&self->lock);
+    memcpy(&self->response_data, &response->value, sizeof(HttpResponse));
+    LF_MUTEX_UNLOCK(&self->lock);
+  =}
+}
+
+reactor LatencyHttpServer(port: int = 8080, width: int = 1) {
+  input[width] latencies: interval_t
+
+  server = new SimpleHttpServer(port=port)
+
+  reaction(latencies) -> server.response {=
+    char * output = server.response->value.msg;
+    size_t output_size = sizeof(server.response->value.msg);
+    size_t offset = 0;
+    offset += snprintf(output + offset, output_size - offset, "{ \"latencies\": [");
+
+    for (size_t i = 0; i < latencies_width; ++i) {
+        // Append latency value in nanoseconds
+        offset += snprintf(output + offset, output_size - offset, PRINTF_TIME, latencies[i]->value);
+
+        // Add a comma if not the last element
+        if (i < self->width - 1) {
+            offset += snprintf(output + offset, output_size - offset, ", ");
+        }
+    }
+
+    // Close the JSON array and object
+    snprintf(output + offset, output_size - offset, "] }");
+    lf_set_present(server.response);
+  =}
+}
+
+main reactor {
+  m = new SimpleHttpServer(port=8080)
+}

@@ -1,0 +1,115 @@
+target C {
+  coordination: decentralized,
+  keepalive: true
+}
+
+import WebSocketServerString from "lib/WebSocketServerString.lf"
+import Account from "lib/Account.lf"
+
+reactor Server(
+    hostport: int = 8080,
+    initial_file: string = {= NULL =},
+    null_message_period: time = 1 s) {
+  input in1: int
+  input in2: int
+  output received: int
+  timer t(0, null_message_period)
+  w = new WebSocketServerString(hostport=hostport, initial_file=initial_file)
+
+  reaction(w.received, t) -> received {=
+    if (w.received->is_present) {
+      lf_set(received, atoi(w.received->value));
+    } else {
+      // Send a null message.
+      lf_set(received, 0);
+    }
+  =}
+
+  reaction(in1, in2) -> w.in_dynamic {=
+    // Give preference to acknowledging the deposit quickly.
+    int amount;
+    if (in2->is_present) {
+      amount = in2->value;
+    } else {
+      amount = in1->value;
+    }
+    char* result;
+    asprintf(&result, "%d", amount);
+    lf_set_array(w.in_dynamic, result, strlen(result));
+  =} tardy {=
+    // Ignore STP violations.
+    int amount;
+    if (in2->is_present) {
+      amount = in2->value;
+    } else {
+      amount = in1->value;
+    }
+    char* result;
+    asprintf(&result, "%d", amount);
+    lf_set_array(w.in_dynamic, result, strlen(result));
+  =}
+}
+
+reactor QuickDeposit {
+  input deposit: int
+  input true_balance: int
+  output ack: int
+
+  state balance: int = 0
+
+  reaction(true_balance, deposit) -> ack {=
+    if (true_balance->is_present) {
+      self->balance = true_balance->value;
+    }
+    if (deposit->is_present) {
+      if (deposit->value >= 0) {
+        // It is a deposit.
+        self->balance += deposit->value;
+      }
+    }
+    lf_set(ack, self->balance);
+    lf_print("**** Tentative balance: %d", self->balance);
+  =} tardy {=
+    // Ignore STP violations.
+    if (true_balance->is_present) {
+      self->balance = true_balance->value;
+    }
+    if (deposit->is_present) {
+      if (deposit->value >= 0) {
+        // It is a deposit.
+        self->balance += deposit->value;
+      }
+    }
+    lf_set(ack, self->balance);
+    lf_print("**** Tentative balance: %d", self->balance);;
+  =}
+}
+
+federated reactor {
+  w1 = new Server(hostport=8080, null_message_period = 5 s, initial_file="Bank1.html")
+  w2 = new Server(hostport=8081, null_message_period = 5 s, initial_file="Bank2.html")
+  @maxwait(forever)
+  a1 = new Account()
+  @maxwait(forever)
+  a2 = new Account()
+
+  w1.received -> a1.in1
+  w2.received -> a2.in2
+  w1.received -> a2.in1
+  w2.received -> a1.in2
+
+  a1.out -> w1.in1
+  a2.out -> w2.in1
+
+  @maxwait(30 ms)
+  q1 = new QuickDeposit()
+  @maxwait(30 ms)
+  q2 = new QuickDeposit()
+
+  w1.received -> q1.deposit
+  w2.received -> q2.deposit
+  a1.out -> q1.true_balance
+  a2.out -> q2.true_balance
+  q1.ack -> w1.in2
+  q2.ack -> w2.in2
+}

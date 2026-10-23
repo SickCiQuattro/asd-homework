@@ -1,0 +1,67 @@
+{
+  "extensionVersion": "1.5.0",
+  "fileName": "/Users/filippocamossi/Developer/Architetture_homework/homework_spi/test_all/waveform.vcd",
+  "markerTime": null,
+  "altMarkerTime": null,
+  "selectedSignal": {
+    "name": "tst_bench_top.clk",
+    "msb": -1,
+    "lsb": -1
+  },
+  "zoomRatio": 0.02,
+  "scrollLeft": 0,
+  "displayedSignals": [
+    {
+      "dataType": "netlist-variable",
+      "netlistId": 3,
+      "name": "tst_bench_top.mosi",
+      "numberFormat": "binary",
+      "colorIndex": 0,
+      "rowHeight": 1,
+      "verticalScale": 1,
+      "nameType": "fullPath",
+      "customName": "mosi",
+      "renderType": "binary",
+      "valueLinkCommand": ""
+    },
+    {
+      "dataType": "netlist-variable",
+      "netlistId": 4,
+      "name": "tst_bench_top.miso",
+      "numberFormat": "binary",
+      "colorIndex": 0,
+      "rowHeight": 1,
+      "verticalScale": 1,
+      "nameType": "fullPath",
+      "customName": "miso",
+      "renderType": "binary",
+      "valueLinkCommand": ""
+    },
+    {
+      "dataType": "netlist-variable",
+      "netlistId": 2,
+      "name": "tst_bench_top.sck",
+      "numberFormat": "binary",
+      "colorIndex": 0,
+      "rowHeight": 1,
+      "verticalScale": 1,
+      "nameType": "fullPath",
+      "customName": "sck",
+      "renderType": "binary",
+      "valueLinkCommand": ""
+    },
+    {
+      "dataType": "netlist-variable",
+      "netlistId": 15,
+      "name": "tst_bench_top.clk",
+      "numberFormat": "binary",
+      "colorIndex": 0,
+      "rowHeight": 1,
+      "verticalScale": 1,
+      "nameType": "fullPath",
+      "customName": "clk",
+      "renderType": "binary",
+      "valueLinkCommand": ""
+    }
+  ]
+}

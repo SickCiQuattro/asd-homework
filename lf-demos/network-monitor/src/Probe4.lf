@@ -1,0 +1,29 @@
+/**
+ * This examples uses the NetworkMonitor reactor to measure the latency to all other nodes in the
+ * federation. The NetworkMonitor runs a HTTP server that exposes the latency data in JSON format.
+ * This program can run asynchronously in the background as a daemon and be queried by other
+ * programs (e.g. LF programs) to get the latency data.
+ */
+target C {
+  coordination: decentralized
+}
+
+import NetworkMonitor from "lib/NetworkMonitor.lf"
+
+preamble {=
+  #include "network_latency_probe.h"
+=}
+
+reactor NodeAsync(bank_index: int = 0, width: int = 1) {
+  input[width] probe_in: LatencyMessage
+  output[width] probe_out: LatencyMessage
+
+  monitor = new NetworkMonitor(bank_index=bank_index, width=width)
+  monitor.probe_out -> probe_out
+  probe_in -> monitor.probe_in
+}
+
+federated reactor(num_nodes: int = 2) {
+  m = new[num_nodes] NodeAsync(width=num_nodes)
+  m.probe_out ~> interleaved(m.probe_in)
+}

@@ -1,0 +1,443 @@
+/**
+ * This program implements a simple LF-based quiz between two LLM agents (as federate)
+ * and a Judge federate that measures latency.
+ *
+ * LlmA loads a Llama-2-7B chat model.
+ * LlmB loads a Llama-2-70B chat model.
+ * Both use optional 4-bit quantization (bitsandbytes) and, run on a CUDA GPU.
+ *
+ * Each Llm federate:
+ *  Initializes its tokenizer and model once in the startup reaction.
+ *  Spawns a background thread per query to call model.generate().
+ *  Cleans the decoded text into a short, one-line answer.
+ *  Uses a physical action (done) to notify that the answer is ready and sets its output port.
+ *
+ * The Judge federate:
+ *   Reads user queries.
+ *   Broadcasts each query on ask to both LlmA and LlmB.
+ *   Reads physical timestamps when the question is issued.
+ *   Declares the winner as the LLM that responds first and prints its latency and answer.
+ *   Triggers a 5 s timeout if neither LLM responds, and terminates the program when the user types "quit".
+ *
+ * @author Deeksha Prahlad and Hokeun Kim
+ */
+target Python { keepalive: true }
+
+preamble {=
+  import threading
+  import time
+  import torch
+  from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+=}
+
+reactor LlmA {
+  state th
+  state running = False
+  state out_text = ""
+  state out_ms = -1
+  state ready = False
+
+  input user_in
+  output answer_text
+  output answer_ms
+  output ready_out
+  physical action done
+
+  // This reaction is loading the LLM model and sends a ready out output 
+  // TODO: each llm model from meta is gated and needs request access (See README for more info). 
+  // TODO: HuggingFace client login is required.
+  reaction(startup) -> ready_out {=
+    print("[LlmA] Loading 7B", flush=True)
+
+    self.has_cuda = torch.cuda.is_available()
+    self.dtype = torch.bfloat16 if self.has_cuda else torch.float32
+
+    model_id = "meta-llama/Llama-2-7b-chat-hf"
+    #This is a pretrained tokenizer from hugging face.
+    self.tokenizer_a = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+    if self.tokenizer_a.pad_token_id is None:
+      self.tokenizer_a.pad_token = self.tokenizer_a.eos_token
+    #Here we map the device to the GPU. 
+    common_a = dict(
+      device_map="auto" if self.has_cuda else None,
+      torch_dtype=self.dtype,
+      low_cpu_mem_usage=True,
+    )
+    #The 4 bit quantization will be selected if the device supports it.
+    try:
+      import bitsandbytes as bnb
+      common_a["quantization_config"] = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=self.dtype,
+      )
+    except Exception:
+      pass
+     
+    #Here we load the model and map it to the device.
+    self.model_a = AutoModelForCausalLM.from_pretrained(model_id, **common_a)
+    self.model_a.eval()
+
+    #Text-generation module. 
+    self.GEN_A = dict(
+      max_new_tokens=24,
+      do_sample=False,
+      eos_token_id=self.tokenizer_a.eos_token_id,
+      pad_token_id=self.tokenizer_a.pad_token_id,
+    )
+
+    print("[LlmA] Ready.", flush=True)
+    self.ready = True
+    ready_out.set(True)
+  =}
+
+  //This reaction receives the user query and records the the inference time for the text-generation.
+  reaction(user_in) -> done {=
+    if not self.ready:
+      return
+    if self.running:
+      return
+    self.running = True
+    query = user_in.value
+
+    #model prompt and calling the model to generate, then post-process the output.
+    def worker():
+      start_ns = time.perf_counter_ns()
+      text = ""
+      try:
+        prompt = f"You are a concise Q&A assistant.\n\n{query}\n"
+        inputs = self.tokenizer_a(prompt, return_tensors="pt")
+        if self.has_cuda:
+          inputs = {k: v.to("cuda") for k, v in inputs.items()}
+
+        with torch.no_grad():
+          out = self.model_a.generate(**inputs, **self.GEN_A)
+
+        plen = inputs["input_ids"].shape[1]
+        txt = self.tokenizer_a.decode(out[0][plen:], skip_special_tokens=True)
+
+        t = txt.strip()
+        for sep in ["\n", ". ", "  "]:
+          idx = t.find(sep)
+          if idx > 0:
+            t = t[:idx]
+            break
+        text = t.strip().strip(":").strip()
+      finally:
+        end_ns = time.perf_counter_ns()
+        self.out_text = text
+        self.out_ms = int((end_ns - start_ns) / 1_000_000)
+        done.schedule(0)
+
+    self.th = threading.Thread(target=worker, daemon=True)
+    self.th.start()
+  =}
+  //This reaction sets the output buffer
+  reaction(done) -> answer_text, answer_ms {=
+    self.running = False
+    answer_text.set(self.out_text)
+    answer_ms.set(self.out_ms)
+  =}
+}
+
+reactor LlmB {
+  state th
+  state running = False
+  state out_text = ""
+  state out_ms = -1
+  state ready = False
+
+  input user_in
+  output answer_text
+  output answer_ms
+  output ready_out
+  physical action done
+
+  // This reaction is loading the LLM model and sends a ready out output 
+  // TODO: each llm model from meta is gated and needs request access (See README for more info). 
+  // TODO: HuggingFace client login is required.
+  reaction(startup) -> ready_out {=
+    print("[LlmB] Loading 70B", flush=True)
+
+    self.has_cuda = torch.cuda.is_available()
+    self.dtype = torch.bfloat16 if self.has_cuda else torch.float32
+
+    model_id = "meta-llama/Llama-2-70b-chat-hf"
+    #This is a pretrained tokenizer from hugging face.
+    self.tokenizer_b = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+    if self.tokenizer_b.pad_token_id is None:
+      self.tokenizer_b.pad_token = self.tokenizer_b.eos_token
+    #Here we map the device to the GPU.
+    common_b = dict(
+      device_map="auto" if self.has_cuda else None,
+      torch_dtype=self.dtype,
+      low_cpu_mem_usage=True,
+    )
+    #The 4 bit quantization will be selected if the device supports it.
+    try:
+      import bitsandbytes as bnb
+      common_b["quantization_config"] = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=self.dtype,
+      )
+    except Exception:
+      pass
+    #Here we load the model and map it to the device.
+    self.model_b = AutoModelForCausalLM.from_pretrained(model_id, **common_b)
+    self.model_b.eval()
+
+    #Text-generation module.
+    self.GEN_B = dict(
+      max_new_tokens=24,
+      do_sample=False,
+      eos_token_id=self.tokenizer_b.eos_token_id,
+      pad_token_id=self.tokenizer_b.pad_token_id,
+    )
+
+    print("[LlmB] Ready.", flush=True)
+    self.ready = True
+    ready_out.set(True)
+  =}
+
+  #This reaction receives the user query and records the the inference time for the text-generation.
+  reaction(user_in) -> done {=
+    if not self.ready:
+      return
+    if self.running:
+      return
+    self.running = True
+    query = user_in.value
+    
+    #model prompt and calling the model to generate, then post-process the output.
+    def worker():
+      start_ns = time.perf_counter_ns()
+      text = ""
+      try:
+        prompt = f"You are a concise Q&A assistant.\n\n{query}\n"
+        inputs = self.tokenizer_b(prompt, return_tensors="pt")
+        if self.has_cuda:
+          inputs = {k: v.to("cuda") for k, v in inputs.items()}
+
+        with torch.no_grad():
+          out = self.model_b.generate(**inputs, **self.GEN_B)
+
+        plen = inputs["input_ids"].shape[1]
+        txt = self.tokenizer_b.decode(out[0][plen:], skip_special_tokens=True)
+
+        t = txt.strip()
+        for sep in ["\n", ". ", "  "]:
+          idx = t.find(sep)
+          if idx > 0:
+            t = t[:idx]
+            break
+        text = t.strip().strip(":").strip()
+      finally:
+        end_ns = time.perf_counter_ns()
+        self.out_text = text
+        self.out_ms = int((end_ns - start_ns) / 1_000_000)
+        done.schedule(0)
+
+    self.th = threading.Thread(target=worker, daemon=True)
+    self.th.start()
+  =}
+
+  //This reaction sets the output buffer.
+  reaction(done) -> answer_text, answer_ms {=
+    self.running = False
+    answer_text.set(self.out_text)
+    answer_ms.set(self.out_ms)
+  =}
+}
+
+reactor Judge {
+  state th
+  state reader_started = False
+  state eof = False
+  state buffer = ""
+  state waiting = False
+  state physical_base_time = 0
+  state a_ready = False
+  state b_ready = False
+
+  state got_a_text = False
+  state got_a_ms = False
+  state got_b_text = False
+  state got_b_ms = False
+
+  state text_a = ""
+  state text_b = ""
+  state ms_a = -1
+  state ms_b = -1
+
+  state can_prompt
+
+  input ready_a
+  input ready_b
+
+  input llma_text
+  input llma_ms
+  input llmb_text
+  input llmb_ms
+
+  output ask
+  output quit
+
+  physical action line
+  physical action tick
+  physical action timeout(5 sec)
+
+  reaction(startup) {=
+    import threading
+    self.can_prompt = threading.Event()
+    self.can_prompt.set()
+    print("[Judge] Waiting for models", flush=True)
+  =}
+
+  //This reaction is essentially checking if the llmA agent loaded.
+  //It is also running a background thread accepting user query if both are loaded.
+  reaction(ready_a) -> line {=
+    self.a_ready = True
+    if self.a_ready and self.b_ready and not self.reader_started:
+      import threading
+      def reader():
+        while not self.eof:
+          self.can_prompt.wait()
+          s = input("Enter the quiz question (or 'quit')\n")
+          if s == "" or s.lower().strip() == "quit":
+            self.eof = True
+            line.schedule(0)
+            break
+          self.buffer = s
+          self.can_prompt.clear()
+          line.schedule(1)
+      self.reader_started = True
+      print("[Judge] Ready", flush=True)
+      self.th = threading.Thread(target=reader, daemon=True)
+      self.th.start()
+  =}
+
+  //This reaction is essentially checking if the llmB agent loaded.
+  //It is also running a background thread accepting user query if both are loaded.
+  reaction(ready_b) -> line {=
+    self.b_ready = True
+    if self.a_ready and self.b_ready and not self.reader_started:
+      import threading
+      def reader():
+        while not self.eof:
+          self.can_prompt.wait()
+          s = input("Enter the quiz question (or 'quit')\n")
+          if s == "" or s.lower().strip() == "quit":
+            self.eof = True
+            line.schedule(0)
+            break
+          self.buffer = s
+          self.can_prompt.clear()
+          line.schedule(1)
+      self.reader_started = True
+      print("[Judge] Ready", flush=True)
+      self.th = threading.Thread(target=reader, daemon=True)
+      self.th.start()
+  =}
+
+  // This reaction schedules a timeout if not eof 
+  reaction(line) -> tick, timeout, quit {=
+    if self.eof:
+      request_stop()
+    else:
+      self.waiting = True
+      self.physical_base_time = lf.time.physical_elapsed()
+
+      self.got_a_text = False
+      self.got_a_ms = False
+      self.got_b_text = False
+      self.got_b_ms = False
+
+      self.text_a = ""
+      self.text_b = ""
+      self.ms_a = -1
+      self.ms_b = -1
+
+      print(f"\n\n\nQuery: {self.buffer}\n", flush=True)
+      print("waiting...\n", flush=True)
+
+      timeout.schedule(5_000_000_000)
+      tick.schedule(0)
+  =}
+
+  //This reaction broadcasts the user query to both LLM agents via the ask.
+  reaction(tick) -> ask {=
+    ask.set(self.buffer)
+  =}
+
+  //This reaction collects responses from both LLMs, compares inference latencies, and prints the winner.
+  reaction(llma_text, llma_ms, llmb_text, llmb_ms) {=
+    if not self.waiting:
+      return
+
+    if llma_text.is_present:
+      self.text_a = llma_text.value
+      self.got_a_text = True
+    if llma_ms.is_present:
+      self.ms_a = llma_ms.value
+      self.got_a_ms = True
+
+    if llmb_text.is_present:
+      self.text_b = llmb_text.value
+      self.got_b_text = True
+    if llmb_ms.is_present:
+      self.ms_b = llmb_ms.value
+      self.got_b_ms = True
+
+    if not (self.got_a_text and self.got_a_ms and self.got_b_text and self.got_b_ms):
+      return
+
+    self.waiting = False
+
+    winner = None
+    answer = None
+    chosen_ms = None
+
+    if self.ms_a < self.ms_b:
+      winner = "LLM-A"
+      answer = self.text_a
+      chosen_ms = self.ms_a
+    elif self.ms_b < self.ms_a:
+      winner = "LLM-B"
+      answer = self.text_b
+      chosen_ms = self.ms_b
+    else:
+      winner = "LLM-A and LLM-B"
+      answer = self.text_a
+      chosen_ms = self.ms_a
+
+    physical_now  = lf.time.physical_elapsed()
+    judge_phys_ms = int((physical_now - self.physical_base_time) / 1_000_000)
+
+    print(f"LLM-A inference time: {self.ms_a} ms | LLM-B inference time: {self.ms_b} ms", flush=True)
+    print(
+      f"Winner: {winner} | Chosen inference time {chosen_ms} ms | "
+      f"Judge physical time {judge_phys_ms} ms",
+      flush=True,
+    )
+    print(f"{answer}", flush=True)
+
+    self.can_prompt.set()
+  =}
+
+  //This reaction is triggered when the response timeout expires.
+  reaction(timeout) {=
+    if not self.waiting:
+      return
+    self.waiting = False
+
+    physical_now = lf.time.physical_elapsed()
+    physical_ms  = int((physical_now - self.physical_base_time) / 1_000_000)
+
+    print(f"TIMEOUT (5 s)| physical {physical_ms} ms", flush=True)
+
+    self.can_prompt.set()
+  =}
+}

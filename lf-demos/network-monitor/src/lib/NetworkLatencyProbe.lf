@@ -1,0 +1,137 @@
+/**
+ * A library reactor for sending and receiving latency measurement probes. Latency requests are sent
+ * in response to a timer firing. When responses are received they are buffered and handled later by
+ * another timer.
+ *
+ * The latency to itself is always 0. If a response is received after the `worst_case_latency`
+ * parameter, the latency is set to `FOREVER`.
+ */
+target C {
+  files: ["network_latency_probe.h"]
+}
+
+preamble {=
+  #include "network_latency_probe.h"
+  #include <string.h> // memcpy
+=}
+
+reactor NetworkLatencyProbe(
+    bank_index: int = 0,
+    // Whether this reactor should send requests, or just respond to them.
+    send_requests: bool = true,
+    // Time between sending requests.
+    request_interval: time = 2 sec,
+    // Maximum time to wait for a response. If a response is later the latency is assumed to be FOREVER.
+    worst_case_latency: time = 1 sec,
+    // Number of peers (including itself) to send requests to.
+    width: int = 1,
+    // Enable debug printing
+    debug: bool = false) {
+  output[width] msg_out: LatencyMessage
+  input[width] msg_in: LatencyMessage
+
+  output[width] latencies: interval_t
+
+  timer t_request(0, request_interval)
+  timer t_output(worst_case_latency, request_interval)
+
+  state cnt: int = 0
+  state last_sent_request: LatencyMessage[]
+  state last_response: LatencyMessage[]
+
+  reaction(startup) {=
+    if (self->request_interval <= self->worst_case_latency) {
+      lf_print_error_and_exit("Request interval must be greater than worst case latency");
+    }
+
+    self->last_sent_request= (LatencyMessage*)calloc(self->width, sizeof(LatencyMessage));
+    self->last_response = (LatencyMessage*)calloc(self->width, sizeof(LatencyMessage));
+    for (int i = 0; i < self->width; i++) {
+      self->last_sent_request[i].type = LATENCY_INVALID;
+      self->last_response[i].type = LATENCY_INVALID;
+    }
+  =}
+
+  // Send out latency requests to all peers.
+  reaction(t_request) -> msg_out {=
+    if (!self->send_requests) {
+      return;
+    }
+
+    self->cnt++;
+    instant_t timestamp = lf_time_physical();
+
+    if (self->debug) {
+      lf_print("Sending request %d with timestamp: " PRINTF_TIME, self->cnt, timestamp);
+    }
+
+    for (int i = 0; i < self->width; i++) {
+      if (i == self->bank_index) {
+        // Dont send requests to self.
+        continue;
+      }
+
+      msg_out[i]->value.type = LATENCY_REQUEST;
+      msg_out[i]->value.sequence_number = self->cnt;
+      msg_out[i]->value.timestamp = timestamp;
+      lf_set_present(msg_out[i]);
+      memcpy(&self->last_sent_request[i], &msg_out[i]->value, sizeof(LatencyMessage));
+    }
+  =}
+
+  // FIXME: If this reaction, however unlikely, gets triggered logically simultanou to
+  // the t_request reaction, they will both try to write to the same msg_out array.
+  reaction(msg_in) -> msg_out {=
+    for (int i = 0; i < self->width; i++) {
+      if (!msg_in[i]->is_present) {
+        continue;
+      }
+
+      if (msg_in[i]->value.type == LATENCY_RESPONSE) {
+        // If we receive a response, just copy the response into the state variable. Latency estimation
+        // is handled in the t_output reaction.
+        if (self->debug) {
+          lf_print("Received response from %d seq_number=%d timestamp=" PRINTF_TIME, i, msg_in[i]->value.sequence_number, msg_in[i]->value.timestamp);
+        }
+        memcpy(&self->last_response[i], &msg_in[i]->value, sizeof(LatencyMessage));
+      } else if (msg_in[i]->value.type == LATENCY_REQUEST) {
+        // If we receive a request, send a response back. The current logical tag will be equal to the physical
+        // time at which the request was received.
+        if (self->debug) {
+          lf_print("Received Request from %d seq_number=%d timestamp=" PRINTF_TIME, i, self->cnt, msg_in[i]->value.timestamp);
+        }
+        msg_out[i]->value.type = LATENCY_RESPONSE;
+        msg_out[i]->value.sequence_number = msg_in[i]->value.sequence_number;
+        msg_out[i]->value.timestamp = lf_time_logical();
+        lf_set_present(msg_out[i]);
+      } else {
+        lf_print_error("Received message with invalid type %d from peer %d", msg_in[i]->value.type, i);
+      }
+    }
+  =}
+
+  // Compute the latency to all peers and output it.
+  reaction(t_output) -> latencies {=
+    for (int i = 0; i < self->width; i++) {
+      if (i == self->bank_index) {
+        lf_set(latencies[i], 0);
+      } else if (self->last_response[i].type == LATENCY_INVALID) {
+        lf_set(latencies[i], FOREVER);
+      } else if (self->last_response[i].sequence_number < self->last_sent_request[i].sequence_number) {
+        lf_set(latencies[i], FOREVER);
+      } else if (self->last_response[i].sequence_number != self->last_sent_request[i].sequence_number) {
+        lf_print_error("Received response with unexpected sequence number %d from peer %d. Expected %d. Discarding it ...", self->last_response[i].sequence_number, i, self->last_sent_request[i].sequence_number);
+        lf_set(latencies[i], FOREVER);
+      } else {
+        // Calculate the latency as the difference between the timestamp of the request, and the timestamp
+        // in the response message, which is the time at which the request was received by the peer.
+        lf_set(latencies[i], self->last_response[i].timestamp - self->last_sent_request[i].timestamp);
+      }
+    }
+  =}
+
+  reaction(shutdown) {=
+    free(self->last_sent_request);
+    free(self->last_response);
+  =}
+}

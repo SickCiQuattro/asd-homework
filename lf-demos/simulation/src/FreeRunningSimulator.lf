@@ -1,0 +1,61 @@
+/**
+ * This program emulates a simulator that publishes messages that are logically periodic. The
+ * logical and physical times between messages are given by parameters. To model a simulator that
+ * does not keep up with real time, set `physical_period` to be greater than the `logical_period`.
+ * To model a simulator that runs faster than real time, set `physical_period` to be less than the
+ * `logical_period`. To model a real-time simulator, set them equal.
+ *
+ * The message sent is a JSON string containing a count, the logical time of sending, and the
+ * physical time of sending. These are published on the MQTT topic given by the `topic` parameter.
+ *
+ * See ../README.md for prerequisites and further information.
+ *
+ * @author Edward A. Lee
+ *
+ * @param broker The MQTT broker address.
+ * @param topic The topic to publish to.
+ * @param logical_period The logical period of the messages.
+ * @param physical_period The physical period of the messages.
+ */
+target C {
+  fast: true  // Timing is determined by the physical period.
+}
+
+import MQTTPublisher from <mqtt-c/MQTTPublisher.lf>
+
+main reactor(
+    broker: string = "tcp://localhost:1883",
+    topic: string = "simulator-output",
+    logical_period: time = 1 s,
+    physical_period: time = 1100 ms) {
+  timer t(0, logical_period)
+  state count: int = 1
+
+  pub = new MQTTPublisher(
+      topic=topic,
+      address=broker,
+      include_timestamp=true,
+      relative_timestamp=true)
+
+  reaction(t) -> pub.in {=
+    // With NULL, 0 arguments, snprintf tells us how many bytes are needed.
+    // Add one for the null terminator.
+    interval_t start_time = lf_time_physical_elapsed();
+    interval_t now = lf_time_logical_elapsed();
+    char* format = "{\"count\":%d, \"logical_time_at_source\":" PRINTF_TIME ", \"physical_time_at_source\":" PRINTF_TIME "}";
+    size_t length = snprintf(NULL, 0, format, self->count, now, start_time) + 1;
+    // Dynamically allocate memory for the output.
+    char* buffer = (char*)malloc(length);
+    // Populate the output string and increment the count.
+    snprintf(buffer, length, format, self->count, now, start_time);
+    lf_set_array(pub.in, buffer, length);
+    tag_t tag = lf_tag();
+    lf_print("MessageGenerator: At (elapsed) tag " PRINTF_TAG ", publish message:\n        %s",
+      tag.time - lf_time_start(), tag.microstep,
+      pub.in->value
+    );
+    interval_t time_to_sleep = self->count * self->physical_period - lf_time_physical_elapsed();
+    lf_sleep(time_to_sleep);
+    self->count++;
+  =}
+}
